@@ -1,0 +1,106 @@
+#!/bin/bash
+# 機能: tejp: teipを非UTF-8日本語文字コードに対応させるWrappper
+# 作成: 2024-08-30 ken3
+# 更新: 2024-09-02 ken3
+#
+# [使用例]
+# LANG=C LC_ALL=C date | tejp -o -g '^.*$' -- ruby -ne 'require "date"; print DateTime.parse($_)'
+# cal | tejp -o -g '[0-9]+' -- ruby -ne 'print $_.gsub(/./,"X")'
+# cat input.txt | tejp -o -g '[a-z]+' -- ruby -ne 'print $_.upcase'
+# cat input.txt | tejp -o -g '[ァ-ンぁ-ん]+' -- ruby -ne 'print $_.tr("ァ-ンぁ-ん","ぁ-んァ-ン")'
+
+# エラー終了する
+set -e
+abort()
+{
+    echo "[$(basename $0)] $1" >&2
+    exit 1
+}
+
+# 外部コマンドの存在を確認する
+hash -r
+type -a teip &>/dev/null || abort "teip command not found, abort."
+type -a nkf  &>/dev/null || abort "nkf command not found, abort."
+
+# 起動引数を選択コマンド部(SELECTOR)と置換コマンド部(SUBSTCOM)に分解する
+FORCE=''
+SELECTOR=''
+SUBSTCOM=''
+SEPARATOR=''
+for arg in "$@"
+do
+    case $arg in
+    --force) FORCE="$arg" ;;
+    --)  SEPARATOR="$arg" ;;
+    *)
+         if [ -z $SEPARATOR ]; then
+             SELECTOR="$SELECTOR '$arg'"
+         else
+             SUBSTCOM="$SUBSTCOM '$arg'"
+         fi ;;
+    esac
+done
+
+# デバッグ出力
+[ -z $DEBUG ] || echo "[DEBUG] SELECTOR  = $SELECTOR"  >&2
+[ -z $DEBUG ] || echo "[DEBUG] SEPARATOR = $SEPARATOR" >&2
+[ -z $DEBUG ] || echo "[DEBUG] SUBSTCOM  = $SUBSTCOM"  >&2
+
+# 入力ソースの先頭付近をサンプリングして文字コードを判定する
+LENGTH=32768
+SAMPLE=/tmp/tejp.sample.$$
+dd bs=$LENGTH count=1 >$SAMPLE 2>/dev/null
+JPTYPE=$(nkf -g $SAMPLE)
+if [ "$JPTYPE" = 'UTF-16' ]
+then
+    FILETYPE=$(file $SAMPLE)
+    case "$FILETYPE" in
+    *\ Little-endian\ *) JPTYPE="${JPTYPE}LE" ;;
+    *\ Big-endian\ *)    JPTYPE="${JPTYPE}BE" ;;
+    esac
+fi
+
+# 入出力フィルタを選択する
+ENCODER="cat"
+DECODER="cat"
+case "$JPTYPE" in
+EUC*|euc*|CP51932)
+    ENCODER="nkf -wx --ic=CP51932"
+    DECODER="nkf -xe"
+    ;;
+Shift_JIS*|CP932)
+    ENCODER="nkf -wx --ic=CP932"
+    DECODER="nkf -xs"
+    ;;
+ISO-2022-JP*)
+    ENCODER="nkf -wx --ic=ISO-2022-JP-3"
+    DECODER="nkf -xj"
+    ;;
+UTF-16BE)
+    ENCODER="nkf -wx --no-best-fit-chars"
+    DECODER="nkf -xw16B --no-best-fit-chars"
+    ;;
+UTF-16LE)
+    ENCODER="nkf -wx --no-best-fit-chars"
+    DECODER="nkf -xw16L --no-best-fit-chars"
+    ;;
+UTF-8*|ASCII)
+    ;;
+BINARY|*)
+    [ -z $FORCE ] && abort "can't process $JPTYPE, abort."
+    ;;
+esac
+
+# デバッグ出力
+[ -z $DEBUG ] || echo "[DEBUG] JPTYPE  = $JPTYPE"  >&2
+[ -z $DEBUG ] || echo "[DEBUG] ENCODER = $ENCODER" >&2
+[ -z $DEBUG ] || echo "[DEBUG] DECODER = $DECODER" >&2
+
+# 入力の文字コードをUTF-8に変換してteipに渡し、出力を元の文字コードに戻す
+# NOTE: teipコマンドの入出力文字コードはUTF-8とする仕様。
+SELECTOR="$(echo $SELECTOR|nkf -w)"
+SUBSTCOM="$(echo $SUBSTCOM|nkf -w)"
+PATCHER="env LANG=ja_JP.utf8 LC_ALL=ja_JP.utf8 teip $SELECTOR -- $SUBSTCOM"
+cat $SAMPLE - | $ENCODER | eval "$PATCHER" | $DECODER
+rm -f $SAMPLE
+
